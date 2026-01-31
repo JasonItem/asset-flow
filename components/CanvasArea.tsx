@@ -1,5 +1,4 @@
-
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { ImageInfo, SpriteRegion, Point } from '../types';
 import { ZoomIn, ZoomOut, Maximize } from 'lucide-react';
 
@@ -13,23 +12,23 @@ interface Props {
   gridSize: { w: number, h: number };
 }
 
-type HandleType = 'tl' | 'tr' | 'bl' | 'br' | 't' | 'b' | 'l' | 'r';
-
 const CanvasArea: React.FC<Props> = ({ image, regions, onAddRegion, selectedId, onSelect, onUpdate, gridSize }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
   
-  const [isDrawing, setIsDrawing] = useState(false);
-  const [resizing, setResizing] = useState<{ id: string, handle: HandleType, startX: number, startY: number, originalRegion: SpriteRegion } | null>(null);
-  const [moving, setMoving] = useState<{ id: string, startX: number, startY: number, originalRegion: SpriteRegion } | null>(null);
+  const [isSelecting, setIsSelecting] = useState(false);
   const [panning, setPanning] = useState<{ startX: number, startY: number, initialOffsetX: number, initialOffsetY: number } | null>(null);
-  const [startPos, setStartPos] = useState<Point | null>(null);
-  const [currentPos, setCurrentPos] = useState<Point | null>(null);
-  const [hoverGridPos, setHoverGridPos] = useState<Point | null>(null);
+  const [moving, setMoving] = useState<{ id: string, startGridX: number, startGridY: number, originalRegion: SpriteRegion } | null>(null);
+  
+  const [startGrid, setStartGrid] = useState<{ x: number, y: number } | null>(null);
+  const [currentGrid, setCurrentGrid] = useState<{ x: number, y: number } | null>(null);
+  const [hoverGrid, setHoverGrid] = useState<{ x: number, y: number } | null>(null);
+
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isSpacePressed, setIsSpacePressed] = useState(false);
 
+  // 缩放逻辑
   useEffect(() => {
     const handleWheelNative = (e: WheelEvent) => {
       if (e.ctrlKey || e.metaKey) {
@@ -42,6 +41,7 @@ const CanvasArea: React.FC<Props> = ({ image, regions, onAddRegion, selectedId, 
     return () => containerRef.current?.removeEventListener('wheel', handleWheelNative);
   }, []);
 
+  // 空格键抓手逻辑
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.code === 'Space') {
@@ -60,110 +60,134 @@ const CanvasArea: React.FC<Props> = ({ image, regions, onAddRegion, selectedId, 
     };
   }, []);
 
-  const getRelativeCoords = (e: MouseEvent | React.MouseEvent): Point => {
+  const getPixelCoords = (e: MouseEvent | React.MouseEvent): Point => {
     const rect = imgRef.current?.getBoundingClientRect();
     if (!rect) return { x: 0, y: 0 };
-    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+    const scale = image.naturalWidth / rect.width;
+    return { 
+      x: (e.clientX - rect.left) * scale, 
+      y: (e.clientY - rect.top) * scale 
+    };
   };
 
-  const getCurrentScale = () => {
-    if (!imgRef.current) return 1;
-    return image.naturalWidth / imgRef.current.getBoundingClientRect().width;
-  };
-
-  const snapToGrid = (pixelVal: number, size: number) => Math.round(pixelVal / size) * size;
+  const getGridCoords = (pixel: Point) => ({
+    x: Math.floor(pixel.x / gridSize.w),
+    y: Math.floor(pixel.y / gridSize.h)
+  });
 
   const handleMouseDown = (e: React.MouseEvent) => {
     if (e.button !== 0 && e.button !== 1) return;
-    
-    // 关键：防止浏览器默认的选择行为
     e.preventDefault();
 
     if (isSpacePressed || e.button === 1) {
+      // Corrected the duplicated key in the object literal below
       setPanning({ startX: e.clientX, startY: e.clientY, initialOffsetX: offset.x, initialOffsetY: offset.y });
       return;
     }
 
-    const coords = getRelativeCoords(e);
-    const scale = getCurrentScale();
-    const pixelX = coords.x * scale;
-    const pixelY = coords.y * scale;
-    
+    const pixelPos = getPixelCoords(e);
+    const gridPos = getGridCoords(pixelPos);
+
+    // 检查是否点击在已有区域上
     const clickedRegion = [...regions].reverse().find(r => 
-      pixelX >= r.x && pixelX <= r.x + r.width && pixelY >= r.y && pixelY <= r.y + r.height
+      pixelPos.x >= r.x && pixelPos.x <= r.x + r.width && pixelPos.y >= r.y && pixelPos.y <= r.y + r.height
     );
 
     if (clickedRegion) {
       onSelect(clickedRegion.id);
-      setMoving({ id: clickedRegion.id, startX: e.clientX, startY: e.clientY, originalRegion: { ...clickedRegion } });
+      setMoving({ 
+        id: clickedRegion.id, 
+        startGridX: gridPos.x, 
+        startGridY: gridPos.y, 
+        originalRegion: { ...clickedRegion } 
+      });
     } else {
-      setIsDrawing(true);
-      const sX = snapToGrid(pixelX, gridSize.w);
-      const sY = snapToGrid(pixelY, gridSize.h);
-      setStartPos({ x: sX / scale, y: sY / scale });
-      setCurrentPos({ x: sX / scale, y: sY / scale });
+      setIsSelecting(true);
+      setStartGrid(gridPos);
+      setCurrentGrid(gridPos);
       onSelect(null);
     }
   };
 
   useEffect(() => {
     const handleMouseMoveGlobal = (e: MouseEvent) => {
-      const scale = getCurrentScale();
-      const coords = getRelativeCoords(e);
-      
-      // 更新网格悬停位置
-      const hX = Math.floor((coords.x * scale) / gridSize.w) * gridSize.w;
-      const hY = Math.floor((coords.y * scale) / gridSize.h) * gridSize.h;
-      setHoverGridPos({ x: hX, y: hY });
+      const pixelPos = getPixelCoords(e);
+      const gridPos = getGridCoords(pixelPos);
+      setHoverGrid(gridPos);
 
       if (panning) {
-        setOffset({ x: panning.initialOffsetX + (e.clientX - panning.startX), y: panning.initialOffsetY + (e.clientY - panning.startY) });
-      } else if (resizing) {
-        const dx = (e.clientX - resizing.startX) * scale;
-        const dy = (e.clientY - resizing.startY) * scale;
-        const { originalRegion, handle, id } = resizing;
-        let { x, y, width, height } = originalRegion;
-        if (handle.includes('t')) { y = snapToGrid(originalRegion.y + dy, gridSize.h); height = originalRegion.height + (originalRegion.y - y); }
-        if (handle.includes('b')) { height = snapToGrid(originalRegion.height + dy, gridSize.h); }
-        if (handle.includes('l')) { x = snapToGrid(originalRegion.x + dx, gridSize.w); width = originalRegion.width + (originalRegion.x - x); }
-        if (handle.includes('r')) { width = snapToGrid(originalRegion.width + dx, gridSize.w); }
-        onUpdate(id, { x, y, width: Math.max(gridSize.w, width), height: Math.max(gridSize.h, height) });
+        setOffset({ 
+          x: panning.initialOffsetX + (e.clientX - panning.startX), 
+          y: panning.initialOffsetY + (e.clientY - panning.startY) 
+        });
       } else if (moving) {
-        const dx = (e.clientX - moving.startX) * scale;
-        const dy = (e.clientY - moving.startY) * scale;
-        onUpdate(moving.id, { x: snapToGrid(moving.originalRegion.x + dx, gridSize.w), y: snapToGrid(moving.originalRegion.y + dy, gridSize.h) });
-      } else if (isDrawing && startPos) {
-        const pixelX = snapToGrid(coords.x * scale, gridSize.w);
-        const pixelY = snapToGrid(coords.y * scale, gridSize.h);
-        setCurrentPos({ x: pixelX / scale, y: pixelY / scale });
+        const dx = (gridPos.x - moving.startGridX) * gridSize.w;
+        const dy = (gridPos.y - moving.startGridY) * gridSize.h;
+        onUpdate(moving.id, { 
+          x: moving.originalRegion.x + dx, 
+          y: moving.originalRegion.y + dy 
+        });
+      } else if (isSelecting) {
+        setCurrentGrid(gridPos);
       }
     };
+
     const handleMouseUpGlobal = () => {
-      if (isDrawing && startPos && currentPos) {
-        const scale = getCurrentScale();
-        const x = Math.round(Math.min(startPos.x, currentPos.x) * scale);
-        const y = Math.round(Math.min(startPos.y, currentPos.y) * scale);
-        const w = Math.round(Math.abs(startPos.x - currentPos.x) * scale);
-        const h = Math.round(Math.abs(startPos.y - currentPos.y) * scale);
-        if (w >= gridSize.w && h >= gridSize.h) onAddRegion({ x, y, width: w, height: h });
+      if (isSelecting && startGrid && currentGrid) {
+        const minGX = Math.min(startGrid.x, currentGrid.x);
+        const maxGX = Math.max(startGrid.x, currentGrid.x);
+        const minGY = Math.min(startGrid.y, currentGrid.y);
+        const maxGY = Math.max(startGrid.y, currentGrid.y);
+
+        const x = minGX * gridSize.w;
+        const y = minGY * gridSize.h;
+        const w = (maxGX - minGX + 1) * gridSize.w;
+        const h = (maxGY - minGY + 1) * gridSize.h;
+
+        // 确保不会创建超出图片的区域
+        if (x >= 0 && y >= 0) {
+          onAddRegion({ x, y, width: w, height: h });
+        }
       }
-      setPanning(null); setResizing(null); setMoving(null); setIsDrawing(false); setStartPos(null); setCurrentPos(null);
+      setPanning(null);
+      setMoving(null);
+      setIsSelecting(false);
+      setStartGrid(null);
+      setCurrentGrid(null);
     };
+
     window.addEventListener('mousemove', handleMouseMoveGlobal);
     window.addEventListener('mouseup', handleMouseUpGlobal);
-    return () => { window.removeEventListener('mousemove', handleMouseMoveGlobal); window.removeEventListener('mouseup', handleMouseUpGlobal); };
-  }, [panning, resizing, moving, isDrawing, startPos, currentPos, gridSize, onUpdate]);
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMoveGlobal);
+      window.removeEventListener('mouseup', handleMouseUpGlobal);
+    };
+  }, [panning, moving, isSelecting, startGrid, currentGrid, gridSize, onUpdate, onAddRegion]);
 
   const imgScale = (imgRef.current?.clientWidth || image.naturalWidth) / image.naturalWidth;
+
+  // 计算当前正在框选的视觉区域
+  const selectionRect = useMemo(() => {
+    if (!isSelecting || !startGrid || !currentGrid) return null;
+    const minGX = Math.min(startGrid.x, currentGrid.x);
+    const maxGX = Math.max(startGrid.x, currentGrid.x);
+    const minGY = Math.min(startGrid.y, currentGrid.y);
+    const maxGY = Math.max(startGrid.y, currentGrid.y);
+    return {
+      left: minGX * gridSize.w * imgScale,
+      top: minGY * gridSize.h * imgScale,
+      width: (maxGX - minGX + 1) * gridSize.w * imgScale,
+      height: (maxGY - minGY + 1) * gridSize.h * imgScale
+    };
+  }, [isSelecting, startGrid, currentGrid, gridSize, imgScale]);
 
   return (
     <div 
       ref={containerRef}
       className={`relative w-full h-full overflow-hidden flex items-center justify-center bg-slate-50 ${isSpacePressed ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'}`}
       onMouseDown={handleMouseDown}
-      onMouseLeave={() => setHoverGridPos(null)}
     >
-      {/* 缩放控制浮窗 */}
+      {/* 辅助工具栏 */}
       <div className="absolute bottom-8 left-1/2 -translate-x-1/2 flex items-center gap-1 bg-white/90 backdrop-blur-md px-2 py-1.5 rounded-2xl shadow-xl border border-white/50 z-50">
         <button onClick={() => setZoom(z => Math.max(0.1, z * 0.8))} className="p-2 hover:bg-indigo-50 rounded-xl text-slate-500 transition-colors"><ZoomOut size={16}/></button>
         <div className="px-3 text-[11px] font-bold text-slate-600 min-w-[60px] text-center">{Math.round(zoom * 100)}%</div>
@@ -175,58 +199,49 @@ const CanvasArea: React.FC<Props> = ({ image, regions, onAddRegion, selectedId, 
       <div className="relative will-change-transform" style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${zoom})` }}>
         <img ref={imgRef} src={image.url} alt="Sprite" className="max-w-none shadow-2xl rounded-sm border border-slate-200 pointer-events-none" />
         
-        {/* 网格参考线覆盖层 */}
+        {/* 网格参考线 */}
         <div className="grid-overlay" style={{ '--grid-w': `${gridSize.w * imgScale}px`, '--grid-h': `${gridSize.h * imgScale}px` } as any} />
 
-        {/* 网格悬停遮罩 */}
-        {!isDrawing && !moving && !resizing && !panning && hoverGridPos && (
+        {/* 鼠标悬停网格高亮 */}
+        {!isSelecting && hoverGrid && (
           <div 
-            className="absolute bg-indigo-500/10 border border-indigo-500/30 pointer-events-none transition-all duration-75"
+            className="absolute pointer-events-none bg-indigo-500/10 border border-indigo-500/30 z-10"
             style={{ 
-              left: hoverGridPos.x * imgScale, 
-              top: hoverGridPos.y * imgScale, 
+              left: hoverGrid.x * gridSize.w * imgScale, 
+              top: hoverGrid.y * gridSize.h * imgScale, 
               width: gridSize.w * imgScale, 
               height: gridSize.h * imgScale 
             }}
           />
         )}
 
-        {/* 已保存的素材区域 */}
+        {/* 已创建的区域 */}
         {regions.map(region => {
           const isSelected = selectedId === region.id;
           return (
             <div 
               key={region.id}
-              className={`absolute transition-all ${isSelected ? 'border-2 border-indigo-600 bg-indigo-600/15 z-20 shadow-lg' : 'border border-indigo-300 bg-indigo-200/5 hover:border-indigo-500 z-10'}`}
+              className={`absolute transition-all ${isSelected ? 'border-2 border-indigo-600 bg-indigo-600/10 z-20 shadow-lg' : 'border border-indigo-300 bg-indigo-200/5 hover:border-indigo-500 z-10'}`}
               style={{ left: region.x * imgScale, top: region.y * imgScale, width: region.width * imgScale, height: region.height * imgScale }}
             >
               {isSelected && (
-                <>
-                  <div className="absolute -top-10 left-0 bg-indigo-600 text-white text-[10px] px-2 py-1 rounded-md font-bold shadow-md whitespace-nowrap pointer-events-none" style={{ transform: `scale(${1/zoom})`, transformOrigin: 'bottom left' }}>
-                    {region.name} · {region.width}x{region.height}
-                  </div>
-                  {['tl', 'tr', 'bl', 'br'].map(h => (
-                    <div key={h} className="absolute w-2.5 h-2.5 bg-white border-2 border-indigo-600 rounded-full z-30 shadow-md" style={{ 
-                      top: h.includes('t') ? -5 : 'auto', bottom: h.includes('b') ? -5 : 'auto', 
-                      left: h.includes('l') ? -5 : 'auto', right: h.includes('r') ? -5 : 'auto',
-                      transform: `scale(${Math.max(0.5, 1/zoom)})`, cursor: `${h}-resize`
-                    }} onMouseDown={e => { e.stopPropagation(); e.preventDefault(); setResizing({ id: region.id, handle: h as HandleType, startX: e.clientX, startY: e.clientY, originalRegion: region }); }} />
-                  ))}
-                </>
+                <div className="absolute -top-10 left-0 bg-indigo-600 text-white text-[10px] px-2 py-1 rounded-md font-bold shadow-md whitespace-nowrap pointer-events-none" style={{ transform: `scale(${1/zoom})`, transformOrigin: 'bottom left' }}>
+                  {region.name} ({region.width}x{region.height})
+                </div>
               )}
             </div>
           );
         })}
 
-        {/* 正在绘制的区域预览 */}
-        {isDrawing && startPos && currentPos && (
+        {/* 正在选择的区域 (点亮格子的视觉效果) */}
+        {selectionRect && (
           <div 
-            className="absolute border-2 border-indigo-500 bg-indigo-500/10 z-30 shadow-sm" 
+            className="absolute border-2 border-indigo-500 bg-indigo-500/20 z-30 shadow-sm transition-none" 
             style={{ 
-              left: Math.min(startPos.x, currentPos.x) * imgScale, 
-              top: Math.min(startPos.y, currentPos.y) * imgScale, 
-              width: Math.abs(startPos.x - currentPos.x) * imgScale, 
-              height: Math.abs(startPos.y - currentPos.y) * imgScale 
+              left: selectionRect.left, 
+              top: selectionRect.top, 
+              width: selectionRect.width, 
+              height: selectionRect.height 
             }} 
           />
         )}
